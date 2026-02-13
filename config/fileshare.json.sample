@@ -1,0 +1,1 @@
+{"Host":"irc.example.net","Port":"6697","Nick":"FileshareBot","Password":"","Channel":"#files","Name":"File Bot","Version":"DCCFileshare 1.0","Quit":"bye!","ProxyEnabled":false,"Proxy":"","SASL":false,"SharedDir":"./shared","RelayTURNURL":"turns://irc.example.com:5349","RelayAuthUsername":"","RelayAuthSecret":"","MaxUploadBytes":10485760,"MaxFileBytes":104857600}
