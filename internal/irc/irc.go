@@ -91,3 +91,57 @@ func ParseDCCSSEND(rest string) (filename, host string, port int, ok bool) {
 	}
 	return filename, host, p, true
 }
+
+// IsDCCResume returns true if the CTCP is DCC RESUME (filename port position).
+func IsDCCResume(cmd, rest string) bool {
+	return strings.ToUpper(cmd) == "DCC" && strings.HasPrefix(strings.ToUpper(rest), "RESUME ")
+}
+
+// ParseDCCResume parses "RESUME filename port position". Position is the byte offset to resume from.
+// The RESUME verb is matched case-insensitively.
+func ParseDCCResume(rest string) (filename string, port int, position int64, ok bool) {
+	rest = strings.TrimSpace(rest)
+	if !strings.HasPrefix(strings.ToUpper(rest), "RESUME ") {
+		return "", 0, 0, false
+	}
+	rest = strings.TrimSpace(rest[7:])
+	parts := strings.Split(rest, " ")
+	if len(parts) < 3 {
+		return "", 0, 0, false
+	}
+	filename = parts[0]
+	p, err := strconv.Atoi(parts[1])
+	if err != nil || p < 0 {
+		return "", 0, 0, false
+	}
+	pos, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || pos < 0 {
+		return "", 0, 0, false
+	}
+	return filename, p, pos, true
+}
+
+// DCCResumeRestFromMessage returns the "RESUME filename port position" part of msg if it is a DCC RESUME
+// (either CTCP-wrapped \x01DCC RESUME ...\x01 or plain "DCC RESUME ..."). Used so the bot recognizes
+// RESUME even when the client or server omits CTCP delimiters.
+func DCCResumeRestFromMessage(msg string) (rest string, ok bool) {
+	msg = strings.TrimSpace(msg)
+	if len(msg) >= 2 && msg[0] == '\x01' && msg[len(msg)-1] == '\x01' {
+		inner := msg[1 : len(msg)-1]
+		parts := strings.SplitN(inner, " ", 2)
+		if len(parts) == 2 && strings.ToUpper(parts[0]) == "DCC" && strings.HasPrefix(strings.ToUpper(parts[1]), "RESUME ") {
+			return parts[1], true
+		}
+	}
+	if strings.HasPrefix(strings.ToUpper(msg), "DCC RESUME ") {
+		rest = "RESUME " + strings.TrimSpace(msg[11:]) // so ParseDCCResume receives "RESUME filename port position"
+		return rest, true
+	}
+	return "", false
+}
+
+// DCCAcceptCTCP returns the CTCP string for DCC ACCEPT (filename port position).
+// Used to allow a client to resume a download from the given position; client then connects to port.
+func DCCAcceptCTCP(filename string, port int, position int64) string {
+	return "\x01DCC ACCEPT " + filename + " " + strconv.Itoa(port) + " " + strconv.FormatInt(position, 10) + "\x01"
+}

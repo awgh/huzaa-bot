@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/url"
 	"strconv"
@@ -13,6 +14,9 @@ import (
 
 	"github.com/awgh/huzaa-bot/internal/relayprotocol"
 )
+
+// Debug enables debug logging for SendFile (chunk and total bytes). Set by main when -debug is true.
+var Debug bool
 
 // GenerateSessionID returns a random session ID for relay sessions.
 func GenerateSessionID() (string, error) {
@@ -25,13 +29,16 @@ func GenerateSessionID() (string, error) {
 
 // Client connects to the relay over TLS and performs session register + stream.
 type Client struct {
-	relayHost string
-	relayPort int
-	tlsConfig *tls.Config
+	relayHost   string
+	relayPort   int
+	tlsConfig   *tls.Config
+	authUsername string
+	authSecret   string
 }
 
 // NewClient creates a relay client. turnURL is e.g. "turns://irc.example.com:5349".
-func NewClient(turnURL string, tlsConfig *tls.Config) (*Client, error) {
+// username and secret are optional; when both are set, the client sends MsgAuth after each dial (for relays with turn_users).
+func NewClient(turnURL string, tlsConfig *tls.Config, username, secret string) (*Client, error) {
 	u, err := url.Parse(turnURL)
 	if err != nil {
 		return nil, err
@@ -48,10 +55,38 @@ func NewClient(turnURL string, tlsConfig *tls.Config) (*Client, error) {
 		tlsConfig = &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
 	}
 	return &Client{
-		relayHost: host,
-		relayPort: port,
-		tlsConfig: tlsConfig,
+		relayHost:     host,
+		relayPort:     port,
+		tlsConfig:     tlsConfig,
+		authUsername:  username,
+		authSecret:    secret,
 	}, nil
+}
+
+// auth sends MsgAuth (username + secret) and waits for MsgAuthOk or MsgError. Required for all relay connections.
+func (c *Client) auth(conn *tls.Conn) error {
+	if c.authUsername == "" || c.authSecret == "" {
+		return fmt.Errorf("relay auth: username and secret required")
+	}
+	un := []byte(c.authUsername)
+	payload := make([]byte, 4+len(un)+len(c.authSecret))
+	binary.BigEndian.PutUint32(payload[:4], uint32(len(un)))
+	copy(payload[4:], un)
+	copy(payload[4+len(un):], c.authSecret)
+	if err := relayprotocol.WriteFrame(conn, relayprotocol.MsgAuth, payload); err != nil {
+		return err
+	}
+	msgType, resp, err := relayprotocol.ReadFrame(conn)
+	if err != nil {
+		return err
+	}
+	if msgType == relayprotocol.MsgError {
+		return fmt.Errorf("relay auth: %s", string(resp))
+	}
+	if msgType != relayprotocol.MsgAuthOk {
+		return fmt.Errorf("relay: unexpected response to auth (type %d)", msgType)
+	}
+	return nil
 }
 
 // DownloadSession holds the connection for a download after RegisterDownload.
@@ -69,10 +104,16 @@ func (d *DownloadSession) SendFile(content io.Reader, maxBytes int64) error {
 			if maxBytes > 0 && sent+int64(n) > maxBytes {
 				n = int(maxBytes - sent)
 			}
-			if err := relayprotocol.WriteFrame(d.conn, relayprotocol.MsgData, buf[:n]); err != nil {
+			// Copy payload so we don't reuse buf before the write is flushed to the network.
+			payload := make([]byte, n)
+			copy(payload, buf[:n])
+			if err := relayprotocol.WriteFrame(d.conn, relayprotocol.MsgData, payload); err != nil {
 				return err
 			}
 			sent += int64(n)
+			if Debug {
+				log.Printf("[debug] SendFile sent chunk %d bytes, total %d", n, sent)
+			}
 			if maxBytes > 0 && sent >= maxBytes {
 				break
 			}
@@ -83,6 +124,9 @@ func (d *DownloadSession) SendFile(content io.Reader, maxBytes int64) error {
 		if err != nil {
 			return err
 		}
+	}
+	if Debug {
+		log.Printf("[debug] SendFile sending EOF, total %d bytes", sent)
 	}
 	return relayprotocol.WriteFrame(d.conn, relayprotocol.MsgEOF, nil)
 }
@@ -101,6 +145,10 @@ func (d *DownloadSession) Close() error {
 func (c *Client) RegisterDownload(sessionID, filename string) (host string, port int, sess *DownloadSession, err error) {
 	conn, err := c.dial()
 	if err != nil {
+		return "", 0, nil, err
+	}
+	if err := c.auth(conn); err != nil {
+		conn.Close()
 		return "", 0, nil, err
 	}
 	payload := make([]byte, 0, 36+len(filename))
@@ -180,6 +228,10 @@ func (u *UploadStream) Close() error {
 func (c *Client) RegisterUploadStream(sessionID, filename string) (host string, port int, stream *UploadStream, err error) {
 	conn, err := c.dial()
 	if err != nil {
+		return "", 0, nil, err
+	}
+	if err := c.auth(conn); err != nil {
+		conn.Close()
 		return "", 0, nil, err
 	}
 	payload := make([]byte, 0, 36+len(filename))

@@ -10,7 +10,7 @@ go build -o fileshare ./cmd/fileshare
 
 ## Config
 
-Copy `config/fileshare.json.sample` to `config/fileshare.json` (or add JSON files to the config directory). Required: `Host`, `SharedDir`, `RelayTURNURL`. Optional: `MaxUploadBytes`, `MaxFileBytes` (default 100MB for downloads).
+Copy `config/fileshare.json.sample` to `config/fileshare.json` (or add JSON files to the config directory). Required: `Host`, `SharedDir`, `RelayTURNURL`. Set `RelayAuthUsername` and `RelayAuthSecret` to match one of the relay's `turn_users` entries (auth is required; empty username is not supported). Optional: `MaxUploadBytes`, `MaxFileBytes` (default 100MB for downloads).
 
 ## Run
 
@@ -28,6 +28,8 @@ All commands are accepted by **private message only** (not in channel). Directio
 - `.help` – show commands (one short line)
 
 **DCC SSEND and clients:** The bot sends the relay’s IP in dotted-decimal form in the DCC line so clients that expect a numeric host (e.g. KVIrc) recognize it. Download uses DCC SSEND (bot sends to you); upload uses DCC SRECV (you send to bot). You need a client that supports both (e.g. KVIrc with SSL). Accept SSEND to download, SRECV to upload in the DCC window.
+
+**DCC RESUME:** Interrupted downloads can be resumed. When the client sends DCC RESUME (filename, port, position), the bot replies with DCC ACCEPT and a new port; the client connects there and receives data from the given byte position to end of file.
 
 ## Deploy on IONOS VPS
 
@@ -62,6 +64,7 @@ RELAY_HOST=relay.example.com bash /root/install-bot.sh
    - **`Password`** – For Ergo use `Nick:password` (e.g. `HuzaaBot:YourSecureBotPassword`).
    - **`Channel`** – Channel to join (e.g. `#files`).
    - **`RelayTURNURL`** – Must match your relay (e.g. `turns://irc.example.com:5349`). The install script sets this from `RELAY_HOST`; change if needed.
+   - **`RelayAuthUsername`** and **`RelayAuthSecret`** – Required; must match one of the relay's `turn_users` entries.
    - **`SharedDir`** – Install script sets `/opt/huzaa-bot/shared`; ensure it exists and is writable by `huzaa-bot`.
 
 3. **Start the bot**

@@ -20,7 +20,10 @@ import (
 
 func main() {
 	confDir := flag.String("confdir", "config", "Config directory with *.json")
+	debugFlag := flag.Bool("debug", false, "Enable debug logging for RESUME and download")
 	flag.Parse()
+	debug := *debugFlag
+	turnclient.Debug = debug
 
 	configs, err := config.LoadFileshareConfigs(*confDir)
 	if err != nil {
@@ -35,7 +38,7 @@ func main() {
 		log.Fatalf("shared dir: %v", err)
 	}
 
-	relayClient, err := turnclient.NewClient(configs[0].RelayTURNURL, nil)
+	relayClient, err := turnclient.NewClient(configs[0].RelayTURNURL, nil, configs[0].RelayAuthUsername, configs[0].RelayAuthSecret)
 	if err != nil {
 		log.Fatalf("relay client: %v", err)
 	}
@@ -102,6 +105,79 @@ func main() {
 			_ = filename
 			_ = port
 			send("To upload, use .upload first; I'll give you the relay address.")
+			return
+		}
+
+		// DCC RESUME: client wants to resume a download from a byte position.
+		// Use DCCResumeRestFromMessage so we recognize RESUME with or without CTCP \x01 delimiters.
+		if rest, ok := irc.DCCResumeRestFromMessage(msg); ok {
+			if debug {
+				log.Printf("[debug] PRIVMSG RESUME rest=%q", rest)
+			}
+			resumeFilename, _, position, ok := irc.ParseDCCResume(rest)
+			if !ok {
+				return
+			}
+			if debug {
+				log.Printf("[debug] RESUME parsed filename=%q position=%d replyTo=%s", resumeFilename, position, replyTo)
+			}
+			safePath, err := fileshare.SafePath(root, resumeFilename)
+			if err != nil {
+				send("Invalid path.")
+				return
+			}
+			f, err := os.Open(safePath)
+			if err != nil {
+				send("File not found.")
+				return
+			}
+			info, err := f.Stat()
+			f.Close()
+			if err != nil || info.IsDir() {
+				send("Not a file.")
+				return
+			}
+			size := info.Size()
+			if position < 0 || position >= size {
+				send("Resume position invalid.")
+				return
+			}
+			sessionID, err := turnclient.GenerateSessionID()
+			if err != nil {
+				send("Error creating session.")
+				return
+			}
+			_, port, sess, err := relayClient.RegisterDownload(sessionID, filepath.Base(resumeFilename))
+			if err != nil {
+				send("Relay error: " + err.Error())
+				return
+			}
+			if debug {
+				acceptLine := "\x01DCC ACCEPT " + filepath.Base(resumeFilename) + " " + strconv.Itoa(port) + " " + strconv.FormatInt(position, 10) + "\x01"
+				log.Printf("[debug] sending ACCEPT (NOTICE): %q", acceptLine)
+			}
+			// CTCP replies (e.g. DCC ACCEPT) must be sent as NOTICE so the client recognizes them.
+			c.CtcpReply(replyTo, "DCC ACCEPT", filepath.Base(resumeFilename), strconv.Itoa(port), strconv.FormatInt(position, 10))
+			go func() {
+				f2, _ := os.Open(safePath)
+				if f2 == nil {
+					return
+				}
+				defer f2.Close()
+				defer sess.Close()
+				if _, err := f2.Seek(position, io.SeekStart); err != nil {
+					log.Printf("resume seek: %v", err)
+					return
+				}
+				remaining := size - position
+				if maxFile > 0 && remaining > maxFile {
+					remaining = maxFile
+				}
+				if err := sess.SendFile(f2, remaining); err != nil {
+					log.Printf("resume send: %v", err)
+				}
+			}()
+			send("Resume accepted; connect in your client to continue from byte " + strconv.FormatInt(position, 10) + ".")
 			return
 		}
 
@@ -243,6 +319,168 @@ func main() {
 		default:
 			// ignore
 		}
+	})
+
+	// DCC RESUME arrives as CTCP, not PRIVMSG (goirc parses \x01...\x01 and dispatches as CTCP).
+	// Line.Args = ["DCC", target, "RESUME filename port position"].
+	conn.HandleFunc(ircgo.CTCP, func(c *ircgo.Conn, line *ircgo.Line) {
+		if line.Public() {
+			return
+		}
+		if len(line.Args) < 3 || line.Args[0] != "DCC" || !strings.HasPrefix(strings.ToUpper(line.Args[2]), "RESUME ") {
+			return
+		}
+		rest := line.Args[2]
+		replyTo := line.Nick
+		send := func(m string) { c.Privmsg(replyTo, m) }
+		if debug {
+			log.Printf("[debug] CTCP from %s Args=%q", line.Nick, line.Args)
+		}
+
+		resumeFilename, _, position, ok := irc.ParseDCCResume(rest)
+		if !ok {
+			return
+		}
+		if debug {
+			log.Printf("[debug] RESUME parsed filename=%q position=%d replyTo=%s", resumeFilename, position, replyTo)
+		}
+		safePath, err := fileshare.SafePath(root, resumeFilename)
+		if err != nil {
+			send("Invalid path.")
+			return
+		}
+		f, err := os.Open(safePath)
+		if err != nil {
+			send("File not found.")
+			return
+		}
+		info, err := f.Stat()
+		f.Close()
+		if err != nil || info.IsDir() {
+			send("Not a file.")
+			return
+		}
+		size := info.Size()
+		if position < 0 || position >= size {
+			send("Resume position invalid.")
+			return
+		}
+		sessionID, err := turnclient.GenerateSessionID()
+		if err != nil {
+			send("Error creating session.")
+			return
+		}
+		_, port, sess, err := relayClient.RegisterDownload(sessionID, filepath.Base(resumeFilename))
+		if err != nil {
+			send("Relay error: " + err.Error())
+			return
+		}
+		if debug {
+			acceptLine := "\x01DCC ACCEPT " + filepath.Base(resumeFilename) + " " + strconv.Itoa(port) + " " + strconv.FormatInt(position, 10) + "\x01"
+			log.Printf("[debug] sending ACCEPT (NOTICE): %q", acceptLine)
+		}
+		// CTCP replies (e.g. DCC ACCEPT) must be sent as NOTICE so the client recognizes them.
+		c.CtcpReply(replyTo, "DCC ACCEPT", filepath.Base(resumeFilename), strconv.Itoa(port), strconv.FormatInt(position, 10))
+		go func() {
+			f2, _ := os.Open(safePath)
+			if f2 == nil {
+				return
+			}
+			defer f2.Close()
+			defer sess.Close()
+			if _, err := f2.Seek(position, io.SeekStart); err != nil {
+				log.Printf("resume seek: %v", err)
+				return
+			}
+			remaining := size - position
+			if maxFile > 0 && remaining > maxFile {
+				remaining = maxFile
+			}
+			if err := sess.SendFile(f2, remaining); err != nil {
+				log.Printf("resume send: %v", err)
+			}
+		}()
+		send("Resume accepted; connect in your client to continue from byte " + strconv.FormatInt(position, 10) + ".")
+	})
+
+	// DCC RESUME can also arrive as CTCPREPLY if the client sent it as NOTICE.
+	conn.HandleFunc(ircgo.CTCPREPLY, func(c *ircgo.Conn, line *ircgo.Line) {
+		if line.Public() {
+			return
+		}
+		if len(line.Args) < 3 || line.Args[0] != "DCC" || !strings.HasPrefix(strings.ToUpper(line.Args[2]), "RESUME ") {
+			return
+		}
+		rest := line.Args[2]
+		replyTo := line.Nick
+		send := func(m string) { c.Privmsg(replyTo, m) }
+		if debug {
+			log.Printf("[debug] CTCPREPLY from %s Args=%q", line.Nick, line.Args)
+		}
+
+		resumeFilename, _, position, ok := irc.ParseDCCResume(rest)
+		if !ok {
+			return
+		}
+		if debug {
+			log.Printf("[debug] RESUME parsed filename=%q position=%d replyTo=%s", resumeFilename, position, replyTo)
+		}
+		safePath, err := fileshare.SafePath(root, resumeFilename)
+		if err != nil {
+			send("Invalid path.")
+			return
+		}
+		f, err := os.Open(safePath)
+		if err != nil {
+			send("File not found.")
+			return
+		}
+		info, err := f.Stat()
+		f.Close()
+		if err != nil || info.IsDir() {
+			send("Not a file.")
+			return
+		}
+		size := info.Size()
+		if position < 0 || position >= size {
+			send("Resume position invalid.")
+			return
+		}
+		sessionID, err := turnclient.GenerateSessionID()
+		if err != nil {
+			send("Error creating session.")
+			return
+		}
+		_, port, sess, err := relayClient.RegisterDownload(sessionID, filepath.Base(resumeFilename))
+		if err != nil {
+			send("Relay error: " + err.Error())
+			return
+		}
+		if debug {
+			acceptLine := "\x01DCC ACCEPT " + filepath.Base(resumeFilename) + " " + strconv.Itoa(port) + " " + strconv.FormatInt(position, 10) + "\x01"
+			log.Printf("[debug] sending ACCEPT (NOTICE): %q", acceptLine)
+		}
+		c.CtcpReply(replyTo, "DCC ACCEPT", filepath.Base(resumeFilename), strconv.Itoa(port), strconv.FormatInt(position, 10))
+		go func() {
+			f2, _ := os.Open(safePath)
+			if f2 == nil {
+				return
+			}
+			defer f2.Close()
+			defer sess.Close()
+			if _, err := f2.Seek(position, io.SeekStart); err != nil {
+				log.Printf("resume seek: %v", err)
+				return
+			}
+			remaining := size - position
+			if maxFile > 0 && remaining > maxFile {
+				remaining = maxFile
+			}
+			if err := sess.SendFile(f2, remaining); err != nil {
+				log.Printf("resume send: %v", err)
+			}
+		}()
+		send("Resume accepted; connect in your client to continue from byte " + strconv.FormatInt(position, 10) + ".")
 	})
 
 	conn.HandleFunc(ircgo.DISCONNECTED, func(c *ircgo.Conn, l *ircgo.Line) {
