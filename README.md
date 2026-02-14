@@ -20,10 +20,14 @@ Copy `config/fileshare.json.sample` to `config/fileshare.json` (or add JSON file
 
 ## Commands
 
-- `.list [pattern]` – list files in the shared directory
-- `.get <filename>` – send DCC SSEND (user accepts to download from relay)
-- `.upload [filename]` – send DCC SSEND so user can upload to the shared dir
-- `.help` – show commands
+All commands are accepted by **private message only** (not in channel). Direction is from the user’s perspective:
+
+- `.list [pattern]` – list files
+- `.download <file>` – get a file (empty files rejected)
+- `.put` / `.upload [filename]` – send a file (default name: `upload-YYYYMMDD-HHMMSS` if omitted)
+- `.help` – show commands (one short line)
+
+**DCC SSEND and clients:** The bot sends the relay’s IP in dotted-decimal form in the DCC line so clients that expect a numeric host (e.g. KVIrc) recognize it. Download uses DCC SSEND (bot sends to you); upload uses DCC SRECV (you send to bot). You need a client that supports both (e.g. KVIrc with SSL). Accept SSEND to download, SRECV to upload in the DCC window.
 
 ## Deploy on IONOS VPS
 

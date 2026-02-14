@@ -4,6 +4,7 @@ import (
 	"flag"
 	"io"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -58,6 +59,20 @@ func main() {
 		maxFile = 100 * 1024 * 1024 // 100MB
 	}
 
+	// dccHost resolves host to dotted-decimal IP for DCC CTCP; many clients only recognize numeric IPs.
+	dccHost := func(host string) string {
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			return host
+		}
+		for _, ip := range ips {
+			if ip4 := ip.To4(); ip4 != nil {
+				return ip4.String()
+			}
+		}
+		return host
+	}
+
 	conn := irc.Connect(ircCfg)
 	irc.JoinChannel(conn, configs[0].Channel)
 
@@ -71,6 +86,11 @@ func main() {
 			} else {
 				c.Privmsg(replyTo, m)
 			}
+		}
+
+		// Commands only in private message for now; channel handling reserved for later.
+		if isChannel {
+			return
 		}
 
 		if cmd, rest, ok := irc.ParseCTCP(msg); ok && irc.IsDCCSSEND(cmd, rest) {
@@ -109,9 +129,9 @@ func main() {
 				names = append(names, e.Name())
 			}
 			send(strings.Join(names, ", "))
-		case ".get":
+		case ".download", ".get":
 			if len(parts) < 2 {
-				send("Usage: .get <filename>")
+				send("Usage: .download <filename>")
 				return
 			}
 			filename := parts[1]
@@ -132,6 +152,11 @@ func main() {
 				return
 			}
 			size := info.Size()
+			if size == 0 {
+				f.Close()
+				send("File is empty; cannot send.")
+				return
+			}
 			if maxFile > 0 && size > maxFile {
 				f.Close()
 				send("File too large.")
@@ -149,7 +174,7 @@ func main() {
 				send("Relay error: " + err.Error())
 				return
 			}
-			ctcpMsg := "\x01DCC SSEND " + filepath.Base(filename) + " " + host + " " + strconv.Itoa(port) + " " + strconv.FormatInt(size, 10) + "\x01"
+			ctcpMsg := "\x01DCC SSEND " + filepath.Base(filename) + " " + dccHost(host) + " " + strconv.Itoa(port) + " " + strconv.FormatInt(size, 10) + "\x01"
 			c.Privmsg(replyTo, ctcpMsg)
 			go func() {
 				defer f.Close()
@@ -158,20 +183,20 @@ func main() {
 					log.Printf("send file: %v", err)
 				}
 			}()
-			send("DCC SSEND sent; accept in your client to download from relay.")
-		case ".upload":
+			send("Accept in your client to download from relay.")
+		case ".upload", ".put":
 			sessionID, err := turnclient.GenerateSessionID()
 			if err != nil {
 				send("Error creating session.")
 				return
 			}
-			filename := "upload"
+			filename := ""
 			if len(parts) > 1 {
 				filename = parts[1]
 			}
 			filename = filepath.Base(filename)
 			if filename == "" || filename == "." {
-				filename = "upload"
+				filename = "upload-" + time.Now().Format("20060102-150405")
 			}
 			host, port, stream, err := relayClient.RegisterUploadStream(sessionID, filename)
 			if err != nil {
@@ -186,26 +211,35 @@ func main() {
 			}
 			go func() {
 				defer stream.Close()
-				f, err := os.Create(safePath)
-				if err != nil {
-					send("Could not create file.")
-					return
-				}
 				var r io.Reader = stream
 				if maxUpload > 0 {
 					r = io.LimitReader(stream, maxUpload)
 				}
+				// Don't create the file until we receive at least one byte (avoids empty "upload" from failed/abandoned transfers).
+				buf := make([]byte, 1)
+				n, err := r.Read(buf)
+				if err != nil || n == 0 {
+					return // no data received, create nothing
+				}
+				f, err := os.Create(safePath)
+				if err != nil {
+					log.Printf("upload create: %v", err)
+					return
+				}
+				_, _ = f.Write(buf[:n])
 				_, err = io.Copy(f, r)
 				f.Close()
 				if err != nil {
 					log.Printf("upload write: %v", err)
 				}
 			}()
-			ctcpUpload := "\x01DCC SSEND " + filename + " " + host + " " + strconv.Itoa(port) + "\x01"
+			// DCC SRECV = we (bot) want to RECEIVE; client connects and SENDS. SSEND would mean we send (wrong direction).
+			// Format: DCC SRECV <filename> <ip> <port> <resume_pos>. Resume 0 for new transfer.
+			ctcpUpload := "\x01DCC SRECV " + filename + " " + dccHost(host) + " " + strconv.Itoa(port) + " 0\x01"
 			c.Privmsg(replyTo, ctcpUpload)
-			send("Accept the DCC above to upload as " + filename + ".")
+			send("Accept the DCC above to upload as " + filename + " (your client will send the file).")
 		case ".help":
-			send(".list [pattern] - list files | .get <file> - download | .upload [filename] - get upload address")
+			send(".list [pattern] | .download <file> | .put / .upload [filename]  (PM only)")
 		default:
 			// ignore
 		}
